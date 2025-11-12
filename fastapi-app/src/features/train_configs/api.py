@@ -5,18 +5,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app import config
-from src.features.datasets.api import load_dataset_record, save_dataset_record
+from app.deps import get_storage
+from src.storage import DatabaseStorage
 from src.utils.filesystem import ensure_directories
 
 router = APIRouter(prefix="/v1/datasets", tags=["train-configs"])
 
 
 @router.put("/{dataset_id}/train-config", response_model=Dict[str, Any])
-async def upload_train_config(dataset_id: str, file: UploadFile = File(...)) -> Dict[str, Any]:
-    record = load_dataset_record(dataset_id)
+async def upload_train_config(
+    dataset_id: str,
+    file: UploadFile = File(...),
+    store: DatabaseStorage = Depends(get_storage),
+) -> Dict[str, Any]:
+    record = store.get_dataset(dataset_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
     if not (file.filename.endswith(".yaml") or file.filename.endswith(".yml")):
         raise HTTPException(status_code=400, detail="Only YAML files are allowed")
 
@@ -28,36 +35,43 @@ async def upload_train_config(dataset_id: str, file: UploadFile = File(...)) -> 
     config_path = config.TRAIN_CONFIG_DIR / f"{dataset_id}_train.yaml"
     config_path.write_bytes(content)
 
-    record.train_config = {
+    uploaded_at = datetime.now(timezone.utc)
+    store.set_train_config(dataset_id, file.filename, uploaded_at, len(content))
+    train_config = {
         "filename": file.filename,
-        "uploaded_at": datetime.now(timezone.utc)
-        .replace(tzinfo=timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z"),
+        "uploaded_at": uploaded_at.isoformat().replace("+00:00", "Z"),
         "size": len(content),
     }
-    record.status = "train_config_uploaded"
-    save_dataset_record(record)
-    return {"dataset_id": dataset_id, "train_config": record.train_config}
+    return {"dataset_id": dataset_id, "train_config": train_config}
 
 
 @router.get("/{dataset_id}/train-config", response_model=Dict[str, Any])
-def get_train_config(dataset_id: str) -> Dict[str, Any]:
-    record = load_dataset_record(dataset_id)
+def get_train_config(
+    dataset_id: str, store: DatabaseStorage = Depends(get_storage)
+) -> Dict[str, Any]:
+    record = store.get_dataset(dataset_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
     if not record.train_config:
         raise HTTPException(status_code=404, detail="Train config not uploaded yet")
-    return record.train_config
+    return {
+        "filename": record.train_config.filename,
+        "uploaded_at": record.train_config.uploaded_at.isoformat().replace("+00:00", "Z"),
+        "size": record.train_config.size,
+    }
 
 
 @router.delete("/{dataset_id}/train-config", response_model=Dict[str, Any])
-def delete_train_config(dataset_id: str) -> Dict[str, Any]:
-    record = load_dataset_record(dataset_id)
+def delete_train_config(
+    dataset_id: str, store: DatabaseStorage = Depends(get_storage)
+) -> Dict[str, Any]:
+    record = store.get_dataset(dataset_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
     config_path = config.TRAIN_CONFIG_DIR / f"{dataset_id}_train.yaml"
     if config_path.exists():
         config_path.unlink()
-    record.train_config = None
-    record.status = "train_config_deleted"
-    save_dataset_record(record)
+    store.clear_train_config(dataset_id)
     return {"dataset_id": dataset_id, "status": "train_config_deleted"}
 
 

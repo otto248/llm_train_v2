@@ -8,14 +8,15 @@ import socket
 import subprocess
 import time
 import uuid
-from threading import Lock
 from typing import Any, Dict, List, Optional
 
 import requests
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app import config
+from app.deps import get_storage
+from src.storage import DatabaseStorage
 from src.utils.filesystem import ensure_directories
 
 try:  # pragma: no cover - optional dependency
@@ -56,10 +57,6 @@ class DeploymentInfo(BaseModel):
     vllm_cmd: Optional[str]
     log_file: Optional[str]
     health_path: Optional[str]
-
-
-_STORE_LOCK = Lock()
-_DEPLOYMENTS: Dict[str, Dict[str, Any]] = {}
 
 
 def _get_gpu_free_memory() -> List[tuple[int, int]]:
@@ -169,7 +166,9 @@ def _check_http_health(port: int, path: str) -> bool:
 
 @router.post("", response_model=DeploymentInfo, status_code=201)
 def create_deployment(
-    payload: CreateDeploymentRequest, background: BackgroundTasks
+    payload: CreateDeploymentRequest,
+    background: BackgroundTasks,
+    store: DatabaseStorage = Depends(get_storage),
 ) -> DeploymentInfo:
     _init_directories()
     gpu_id = _pick_gpu(payload.preferred_gpu)
@@ -193,8 +192,8 @@ def create_deployment(
         )
         pid = process.pid
     except Exception as exc:  # pragma: no cover - process failure path
-        with _STORE_LOCK:
-            _DEPLOYMENTS[deployment_id] = {
+        store.create_deployment_record(
+            {
                 "deployment_id": deployment_id,
                 "model_path": payload.model_path,
                 "model_version": payload.model_version,
@@ -210,10 +209,11 @@ def create_deployment(
                 "log_file": log_file,
                 "health_path": payload.health_path or config.DEFAULT_HEALTH_PATH,
             }
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    with _STORE_LOCK:
-        _DEPLOYMENTS[deployment_id] = {
+    record = store.create_deployment_record(
+        {
             "deployment_id": deployment_id,
             "model_path": payload.model_path,
             "model_version": payload.model_version,
@@ -229,18 +229,25 @@ def create_deployment(
             "log_file": log_file,
             "health_path": payload.health_path or config.DEFAULT_HEALTH_PATH,
         }
+    )
 
-    def _background_health_check(deployment_id: str, pid: int, port: int, path: str) -> None:
+    def _background_health_check(
+        deployment_id: str,
+        pid: int,
+        port: int,
+        path: str,
+        storage: DatabaseStorage,
+    ) -> None:
         time.sleep(1.0)
         try:
             os.kill(pid, 0)
         except Exception:
-            with _STORE_LOCK:
-                info = _DEPLOYMENTS.get(deployment_id)
-                if info:
-                    info["status"] = "stopped"
-                    info["health_ok"] = False
-                    info["stopped_at"] = time.time()
+            storage.update_deployment(
+                deployment_id,
+                status="stopped",
+                health_ok=False,
+                stopped_at=time.time(),
+            )
             return
         healthy = False
         for _ in range(12):
@@ -248,11 +255,11 @@ def create_deployment(
                 healthy = True
                 break
             time.sleep(0.5)
-        with _STORE_LOCK:
-            info = _DEPLOYMENTS.get(deployment_id)
-            if info:
-                info["status"] = "running"
-                info["health_ok"] = healthy
+        storage.update_deployment(
+            deployment_id,
+            status="running",
+            health_ok=healthy,
+        )
 
     background.add_task(
         _background_health_check,
@@ -260,43 +267,50 @@ def create_deployment(
         pid,
         port,
         payload.health_path or config.DEFAULT_HEALTH_PATH,
+        store,
     )
-    return DeploymentInfo(**_DEPLOYMENTS[deployment_id])
+    return DeploymentInfo(**record)
 
 
 @router.get("/{deployment_id}", response_model=DeploymentInfo)
-def get_deployment(deployment_id: str) -> DeploymentInfo:
-    with _STORE_LOCK:
-        info = _DEPLOYMENTS.get(deployment_id)
-        if not info:
-            raise HTTPException(status_code=404, detail="Deployment not found")
-        pid = info.get("pid")
+def get_deployment(
+    deployment_id: str, store: DatabaseStorage = Depends(get_storage)
+) -> DeploymentInfo:
+    info = store.get_deployment(deployment_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    pid = info.get("pid")
     if pid:
         try:
             os.kill(pid, 0)
             alive = True
         except Exception:
             alive = False
-        with _STORE_LOCK:
-            info = _DEPLOYMENTS.get(deployment_id)
-            if info:
-                info["status"] = "running" if alive else "stopped"
-                info["health_ok"] = (
-                    _check_http_health(info["port"], info.get("health_path", config.DEFAULT_HEALTH_PATH))
-                    if alive
-                    else False
-                )
+        updated = store.update_deployment(
+            deployment_id,
+            status="running" if alive else "stopped",
+            health_ok=(
+                _check_http_health(info["port"], info.get("health_path", config.DEFAULT_HEALTH_PATH))
+                if alive
+                else False
+            ),
+        )
+        if updated:
+            info = updated
     return DeploymentInfo(**info)
 
 
 @router.delete("/{deployment_id}")
-def delete_deployment(deployment_id: str, force: bool = False) -> Dict[str, Any]:
-    with _STORE_LOCK:
-        info = _DEPLOYMENTS.get(deployment_id)
-        if not info:
-            raise HTTPException(status_code=404, detail="Deployment not found")
-        pid = info.get("pid")
-        info["status"] = "stopping"
+def delete_deployment(
+    deployment_id: str,
+    force: bool = False,
+    store: DatabaseStorage = Depends(get_storage),
+) -> Dict[str, Any]:
+    info = store.get_deployment(deployment_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    pid = info.get("pid")
+    store.update_deployment(deployment_id, status="stopping")
 
     if pid:
         try:
@@ -325,18 +339,20 @@ def delete_deployment(deployment_id: str, force: bool = False) -> Dict[str, Any]
                     except Exception:
                         pass
             else:
-                with _STORE_LOCK:
-                    _DEPLOYMENTS[deployment_id]["status"] = "stopping"
+                store.update_deployment(deployment_id, status="stopping")
                 raise HTTPException(
                     status_code=409,
                     detail="Process did not stop within timeout; retry with force=true",
                 )
 
-    with _STORE_LOCK:
-        record = _DEPLOYMENTS.pop(deployment_id, None)
-        if record:
-            record["status"] = "stopped"
-            record["stopped_at"] = time.time()
+    store.update_deployment(
+        deployment_id,
+        status="stopped",
+        stopped_at=time.time(),
+        pid=None,
+        health_ok=False,
+    )
+    store.delete_deployment(deployment_id)
     return {"detail": "deployment removed", "deployment_id": deployment_id}
 
 
@@ -345,28 +361,34 @@ def list_deployments(
     model: Optional[str] = None,
     tag: Optional[str] = None,
     status: Optional[str] = None,
+    store: DatabaseStorage = Depends(get_storage),
 ) -> List[DeploymentInfo]:
+    records = store.list_deployments(
+        model=model,
+        tag=tag,
+        status=status.lower() if status else None,
+    )
     results: List[DeploymentInfo] = []
-    with _STORE_LOCK:
-        for info in _DEPLOYMENTS.values():
-            pid = info.get("pid")
-            if pid:
-                try:
-                    os.kill(pid, 0)
-                    info["status"] = "running"
-                    info["health_ok"] = _check_http_health(
-                        info["port"], info.get("health_path", config.DEFAULT_HEALTH_PATH)
-                    )
-                except Exception:
-                    info["status"] = "stopped"
-                    info["health_ok"] = False
-            if model and model not in info.get("model_path", ""):
-                continue
-            if tag and tag not in info.get("tags", []):
-                continue
-            if status and (info.get("status") or "").lower() != status.lower():
-                continue
-            results.append(DeploymentInfo(**info))
+    for info in records:
+        pid = info.get("pid")
+        if pid:
+            try:
+                os.kill(pid, 0)
+                alive = True
+            except Exception:
+                alive = False
+            updated = store.update_deployment(
+                info["deployment_id"],
+                status="running" if alive else "stopped",
+                health_ok=(
+                    _check_http_health(info["port"], info.get("health_path", config.DEFAULT_HEALTH_PATH))
+                    if alive
+                    else False
+                ),
+            )
+            if updated:
+                info = updated
+        results.append(DeploymentInfo(**info))
     return results
 
 

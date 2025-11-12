@@ -1,210 +1,633 @@
-"""Simple file-based storage backend for training metadata."""
+"""SQLAlchemy-backed storage for service metadata."""
 
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
-from typing import Dict, Iterable, List, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional
 from uuid import uuid4
 
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    select,
+)
+from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
+
 from src.models import LogEntry, Project, ProjectCreate, ProjectDetail, RunDetail, RunStatus
+from src.models.datasets import DatasetCreateRequest, DatasetFileEntry, DatasetRecord, DatasetTrainConfig
 from src.utils.filesystem import ensure_directories
 
 
-def _now() -> datetime:
+Base = declarative_base()
+
+
+def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _serialize_datetime(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+def _as_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False)
 
 
-def _deserialize_datetime(value: str) -> datetime:
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    return datetime.fromisoformat(value)
+def _from_json(text: Optional[str], default: Any) -> Any:
+    if not text:
+        return default
+    return json.loads(text)
+
+
+class Dataset(Base):
+    __tablename__ = "datasets"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    dtype = Column(String, nullable=True)
+    source = Column(String, nullable=True)
+    task_type = Column(String, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+    status = Column(String, default="created", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    files = relationship("DatasetFile", cascade="all, delete-orphan", back_populates="dataset")
+    train_config = relationship(
+        "TrainConfig", cascade="all, delete-orphan", back_populates="dataset", uselist=False
+    )
+
+
+class DatasetFile(Base):
+    __tablename__ = "dataset_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
+    upload_id = Column(String, unique=True, nullable=False)
+    name = Column(String, nullable=False)
+    stored_name = Column(String, nullable=False)
+    bytes = Column(Integer, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    dataset = relationship("Dataset", back_populates="files")
+
+
+class UploadSession(Base):
+    __tablename__ = "upload_sessions"
+
+    upload_id = Column(String, primary_key=True)
+    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
+    filename = Column(String, nullable=False)
+    stored_filename = Column(String, nullable=False)
+    bytes = Column(Integer, nullable=False)
+    status = Column(String, default="completed", nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+
+class TrainConfig(Base):
+    __tablename__ = "train_configs"
+
+    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), primary_key=True)
+    filename = Column(String, nullable=False)
+    uploaded_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    size = Column(Integer, nullable=False)
+
+    dataset = relationship("Dataset", back_populates="train_config")
+
+
+class ProjectModel(Base):
+    __tablename__ = "projects"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+    dataset_name = Column(String, nullable=False)
+    training_yaml_name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    runs = relationship("RunModel", cascade="all, delete-orphan", back_populates="project")
+
+
+class RunModel(Base):
+    __tablename__ = "runs"
+
+    id = Column(String, primary_key=True)
+    project_id = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String, default=RunStatus.PENDING.value, nullable=False)
+    progress = Column(Float, default=0.0, nullable=False)
+    start_command = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    project = relationship("ProjectModel", back_populates="runs")
+    logs = relationship("RunLogModel", cascade="all, delete-orphan", back_populates="run")
+
+
+class RunLogModel(Base):
+    __tablename__ = "run_logs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    level = Column(String, nullable=False)
+    message = Column(Text, nullable=False)
+
+    run = relationship("RunModel", back_populates="logs")
+
+
+class DeploymentModel(Base):
+    __tablename__ = "deployments"
+
+    deployment_id = Column(String, primary_key=True)
+    model_path = Column(Text, nullable=False)
+    model_version = Column(String, nullable=True)
+    tags_json = Column(Text, nullable=True)
+    gpu_id = Column(Integer, nullable=True)
+    port = Column(Integer, nullable=False)
+    pid = Column(Integer, nullable=True)
+    status = Column(String, nullable=False, default="starting")
+    started_at = Column(Float, nullable=True)
+    stopped_at = Column(Float, nullable=True)
+    health_ok = Column(Boolean, nullable=True)
+    vllm_cmd = Column(Text, nullable=True)
+    log_file = Column(Text, nullable=True)
+    health_path = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class DatabaseStorage:
-    """A minimal JSON file-backed storage for projects and runs."""
+    """High-level storage abstraction backed by SQLite via SQLAlchemy."""
 
-    def __init__(self, db_path: Path):
-        self._path = Path(db_path)
-        ensure_directories(self._path.parent)
-        if not self._path.exists():
-            self._path.write_text(
-                json.dumps({"projects": {}, "runs": {}, "project_runs": {}}, indent=2),
-                encoding="utf-8",
+    def __init__(self, database_url: str, database_path: Path):
+        ensure_directories(database_path.parent)
+        self._engine = create_engine(database_url, future=True)
+        Base.metadata.create_all(self._engine)
+        self._session_factory = sessionmaker(bind=self._engine, expire_on_commit=False, future=True)
+
+    @contextmanager
+    def _session(self) -> Generator[Session, None, None]:
+        session = self._session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    # Dataset operations -------------------------------------------------
+    def create_dataset(self, payload: DatasetCreateRequest) -> DatasetRecord:
+        dataset = Dataset(
+            id=str(uuid4()),
+            name=payload.name,
+            dtype=payload.dtype,
+            source=payload.source,
+            task_type=payload.task_type,
+            metadata_json=_as_json(payload.metadata or {}),
+            status="created",
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        )
+        with self._session() as session:
+            session.add(dataset)
+            session.flush()
+        return self._to_dataset_record(dataset)
+
+    def get_dataset(self, dataset_id: str) -> Optional[DatasetRecord]:
+        with self._session() as session:
+            dataset = session.get(Dataset, dataset_id)
+            if dataset is None:
+                return None
+            session.expunge(dataset)
+            for file in dataset.files:
+                session.expunge(file)
+            if dataset.train_config:
+                session.expunge(dataset.train_config)
+        return self._to_dataset_record(dataset)
+
+    def add_dataset_file(
+        self,
+        dataset_id: str,
+        upload_id: str,
+        filename: str,
+        stored_filename: str,
+        size: int,
+        uploaded_at: datetime,
+    ) -> DatasetRecord:
+        with self._session() as session:
+            dataset = session.get(Dataset, dataset_id)
+            if dataset is None:
+                raise KeyError("dataset not found")
+            file_entry = DatasetFile(
+                dataset_id=dataset_id,
+                upload_id=upload_id,
+                name=filename,
+                stored_name=stored_filename,
+                bytes=size,
+                uploaded_at=uploaded_at,
             )
-        self._lock = Lock()
-
-    # Internal helpers --------------------------------------------------
-    def _load(self) -> Dict[str, Dict[str, dict]]:
-        content = self._path.read_text(encoding="utf-8")
-        if not content:
-            return {"projects": {}, "runs": {}, "project_runs": {}}
-        return json.loads(content)
-
-    def _save(self, data: Dict[str, Dict[str, dict]]) -> None:
-        self._path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _deserialize_project(self, record: dict, runs: Optional[List[RunDetail]] = None) -> ProjectDetail:
-        return ProjectDetail(
-            id=record["id"],
-            name=record["name"],
-            dataset_name=record["dataset_name"],
-            training_yaml_name=record["training_yaml_name"],
-            description=record.get("description"),
-            created_at=_deserialize_datetime(record["created_at"]),
-            updated_at=_deserialize_datetime(record["updated_at"]),
-            runs=runs or [],
-        )
-
-    def _deserialize_project_summary(self, record: dict) -> Project:
-        return Project(
-            id=record["id"],
-            name=record["name"],
-            dataset_name=record["dataset_name"],
-            training_yaml_name=record["training_yaml_name"],
-            description=record.get("description"),
-            created_at=_deserialize_datetime(record["created_at"]),
-            updated_at=_deserialize_datetime(record["updated_at"]),
-        )
-
-    def _deserialize_run(self, record: dict) -> RunDetail:
-        logs = [
-            LogEntry(
-                timestamp=_deserialize_datetime(entry["timestamp"]),
-                level=entry["level"],
-                message=entry["message"],
+            session.add(file_entry)
+            session.add(
+                UploadSession(
+                    upload_id=upload_id,
+                    dataset_id=dataset_id,
+                    filename=filename,
+                    stored_filename=stored_filename,
+                    bytes=size,
+                    status="completed",
+                    created_at=uploaded_at,
+                )
             )
-            for entry in record.get("logs", [])
-        ]
-        return RunDetail(
-            id=record["id"],
-            project_id=record["project_id"],
-            status=RunStatus(record["status"]),
-            progress=record.get("progress", 0.0),
-            start_command=record["start_command"],
-            created_at=_deserialize_datetime(record["created_at"]),
-            updated_at=_deserialize_datetime(record["updated_at"]),
-            logs=logs,
-        )
+            dataset.status = "ready"
+            dataset.updated_at = _utcnow()
+            session.flush()
+            session.refresh(dataset)
+            session.expunge(dataset)
+            for file in dataset.files:
+                session.expunge(file)
+            if dataset.train_config:
+                session.expunge(dataset.train_config)
+        return self._to_dataset_record(dataset)
 
-    # Project operations ------------------------------------------------
-    def create_project(self, payload: ProjectCreate) -> ProjectDetail:
-        now = _now()
-        with self._lock:
-            data = self._load()
-            project_id = str(uuid4())
-            project_record = {
-                "id": project_id,
-                "name": payload.name,
-                "dataset_name": payload.dataset_name,
-                "training_yaml_name": payload.training_yaml_name,
-                "description": payload.description,
-                "created_at": _serialize_datetime(now),
-                "updated_at": _serialize_datetime(now),
+    def remove_upload(self, upload_id: str) -> Optional[Dict[str, Any]]:
+        with self._session() as session:
+            upload = session.get(UploadSession, upload_id)
+            if upload is None:
+                return None
+            dataset = session.get(Dataset, upload.dataset_id)
+            if dataset is None:
+                return None
+            file = session.execute(
+                select(DatasetFile).where(DatasetFile.upload_id == upload_id)
+            ).scalar_one_or_none()
+            if file:
+                session.delete(file)
+            session.delete(upload)
+            dataset.updated_at = _utcnow()
+            if dataset.files:
+                dataset.status = "ready"
+            else:
+                dataset.status = "created"
+            session.flush()
+            session.refresh(dataset)
+            session.expunge(dataset)
+            info = {
+                "dataset_id": upload.dataset_id,
+                "filename": upload.filename,
+                "stored_filename": upload.stored_filename,
             }
-            data["projects"][project_id] = project_record
-            data.setdefault("project_runs", {})[project_id] = []
-            self._save(data)
-        return self._deserialize_project(project_record, runs=[])
+        return info
+
+    def set_train_config(
+        self, dataset_id: str, filename: str, uploaded_at: datetime, size: int
+    ) -> DatasetRecord:
+        with self._session() as session:
+            dataset = session.get(Dataset, dataset_id)
+            if dataset is None:
+                raise KeyError("dataset not found")
+            config_row = session.get(TrainConfig, dataset_id)
+            if config_row is None:
+                config_row = TrainConfig(
+                    dataset_id=dataset_id,
+                    filename=filename,
+                    uploaded_at=uploaded_at,
+                    size=size,
+                )
+                session.add(config_row)
+            else:
+                config_row.filename = filename
+                config_row.uploaded_at = uploaded_at
+                config_row.size = size
+            dataset.status = "train_config_uploaded"
+            dataset.updated_at = _utcnow()
+            session.flush()
+            session.refresh(dataset)
+            session.expunge(dataset)
+            session.expunge(config_row)
+        return self._to_dataset_record(dataset)
+
+    def clear_train_config(self, dataset_id: str) -> DatasetRecord:
+        with self._session() as session:
+            dataset = session.get(Dataset, dataset_id)
+            if dataset is None:
+                raise KeyError("dataset not found")
+            config_row = session.get(TrainConfig, dataset_id)
+            if config_row:
+                session.delete(config_row)
+            dataset.status = "train_config_deleted"
+            dataset.updated_at = _utcnow()
+            session.flush()
+            session.refresh(dataset)
+            session.expunge(dataset)
+        return self._to_dataset_record(dataset)
+
+    # Project operations -------------------------------------------------
+    def create_project(self, payload: ProjectCreate) -> ProjectDetail:
+        project = ProjectModel(
+            id=str(uuid4()),
+            name=payload.name,
+            dataset_name=payload.dataset_name,
+            training_yaml_name=payload.training_yaml_name,
+            description=payload.description,
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        )
+        with self._session() as session:
+            session.add(project)
+            session.flush()
+            session.refresh(project)
+            session.expunge(project)
+        return self._to_project_detail(project, runs=[])
 
     def list_projects(self) -> Iterable[Project]:
-        data = self._load()
-        for record in data.get("projects", {}).values():
-            yield self._deserialize_project_summary(record)
+        with self._session() as session:
+            records = session.execute(select(ProjectModel)).scalars().all()
+            for record in records:
+                session.expunge(record)
+        return [self._to_project_summary(project) for project in records]
 
     def get_project(self, project_id: str) -> Optional[ProjectDetail]:
-        data = self._load()
-        record = data.get("projects", {}).get(project_id)
-        if not record:
-            return None
-        run_ids = data.get("project_runs", {}).get(project_id, [])
-        runs = [self._deserialize_run(data["runs"][rid]) for rid in run_ids if rid in data.get("runs", {})]
-        return self._deserialize_project(record, runs)
+        with self._session() as session:
+            project = session.get(ProjectModel, project_id)
+            if project is None:
+                return None
+            runs = list(project.runs)
+            for run in runs:
+                session.expunge(run)
+                for log in run.logs:
+                    session.expunge(log)
+            session.expunge(project)
+        return self._to_project_detail(project, runs=runs)
 
     def get_project_by_name(self, name: str) -> Optional[ProjectDetail]:
-        data = self._load()
-        for record in data.get("projects", {}).values():
-            if record.get("name") == name:
-                project_id = record["id"]
-                run_ids = data.get("project_runs", {}).get(project_id, [])
-                runs = [
-                    self._deserialize_run(data["runs"][rid])
-                    for rid in run_ids
-                    if rid in data.get("runs", {})
-                ]
-                return self._deserialize_project(record, runs)
-        return None
+        with self._session() as session:
+            project = session.execute(
+                select(ProjectModel).where(ProjectModel.name == name)
+            ).scalar_one_or_none()
+            if project is None:
+                return None
+            runs = list(project.runs)
+            for run in runs:
+                session.expunge(run)
+                for log in run.logs:
+                    session.expunge(log)
+            session.expunge(project)
+        return self._to_project_detail(project, runs=runs)
 
-    # Run operations -----------------------------------------------------
     def create_run(self, project_id: str, start_command: str) -> RunDetail:
-        now = _now()
-        with self._lock:
-            data = self._load()
-            if project_id not in data.get("projects", {}):
+        run = RunModel(
+            id=str(uuid4()),
+            project_id=project_id,
+            status=RunStatus.PENDING.value,
+            progress=0.0,
+            start_command=start_command,
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        )
+        with self._session() as session:
+            project = session.get(ProjectModel, project_id)
+            if project is None:
                 raise KeyError("project not found")
-            run_id = str(uuid4())
-            run_record = {
-                "id": run_id,
-                "project_id": project_id,
-                "status": RunStatus.PENDING.value,
-                "progress": 0.0,
-                "start_command": start_command,
-                "created_at": _serialize_datetime(now),
-                "updated_at": _serialize_datetime(now),
-                "logs": [],
-            }
-            data.setdefault("runs", {})[run_id] = run_record
-            data.setdefault("project_runs", {}).setdefault(project_id, []).append(run_id)
-            self._save(data)
-        return self._deserialize_run(run_record)
+            session.add(run)
+            session.flush()
+            session.refresh(run)
+            session.expunge(run)
+        return self._to_run_detail(run)
+
+    def get_run(self, run_id: str) -> Optional[RunDetail]:
+        with self._session() as session:
+            run = session.get(RunModel, run_id)
+            if run is None:
+                return None
+            logs = list(run.logs)
+            for log in logs:
+                session.expunge(log)
+            session.expunge(run)
+        return self._to_run_detail(run)
 
     def append_run_logs(self, run_id: str, logs: List[LogEntry]) -> RunDetail:
         if not logs:
-            return self.get_run(run_id)
-        with self._lock:
-            data = self._load()
-            run_record = data.get("runs", {}).get(run_id)
-            if not run_record:
+            run = self.get_run(run_id)
+            if run is None:
+                raise KeyError("run not found")
+            return run
+        with self._session() as session:
+            run = session.get(RunModel, run_id)
+            if run is None:
                 raise KeyError("run not found")
             for entry in logs:
-                run_record.setdefault("logs", []).append(
-                    {
-                        "timestamp": _serialize_datetime(entry.timestamp),
-                        "level": entry.level,
-                        "message": entry.message,
-                    }
+                session.add(
+                    RunLogModel(
+                        run_id=run_id,
+                        timestamp=entry.timestamp.astimezone(timezone.utc),
+                        level=entry.level,
+                        message=entry.message,
+                    )
                 )
-            run_record["updated_at"] = _serialize_datetime(_now())
-            self._save(data)
-        return self._deserialize_run(run_record)
+            run.updated_at = _utcnow()
+            session.flush()
+            session.refresh(run)
+            session.expunge(run)
+            for log in run.logs:
+                session.expunge(log)
+        return self._to_run_detail(run)
 
     def update_run_status(
         self, run_id: str, status: RunStatus, progress: Optional[float] = None
     ) -> RunDetail:
-        with self._lock:
-            data = self._load()
-            run_record = data.get("runs", {}).get(run_id)
-            if not run_record:
+        with self._session() as session:
+            run = session.get(RunModel, run_id)
+            if run is None:
                 raise KeyError("run not found")
-            run_record["status"] = status.value
+            run.status = status.value
             if progress is not None:
-                run_record["progress"] = progress
-            run_record["updated_at"] = _serialize_datetime(_now())
-            self._save(data)
-        return self._deserialize_run(run_record)
+                run.progress = progress
+            run.updated_at = _utcnow()
+            session.flush()
+            session.refresh(run)
+            session.expunge(run)
+            for log in run.logs:
+                session.expunge(log)
+        return self._to_run_detail(run)
 
-    def get_run(self, run_id: str) -> RunDetail:
-        data = self._load()
-        record = data.get("runs", {}).get(run_id)
-        if not record:
-            raise KeyError("run not found")
-        return self._deserialize_run(record)
+    # Deployment operations ----------------------------------------------
+    def create_deployment_record(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        record = DeploymentModel(
+            deployment_id=info["deployment_id"],
+            model_path=info["model_path"],
+            model_version=info.get("model_version"),
+            tags_json=_as_json(info.get("tags", [])),
+            gpu_id=info.get("gpu_id"),
+            port=info["port"],
+            pid=info.get("pid"),
+            status=info.get("status", "starting"),
+            started_at=info.get("started_at"),
+            stopped_at=info.get("stopped_at"),
+            health_ok=info.get("health_ok"),
+            vllm_cmd=info.get("vllm_cmd"),
+            log_file=info.get("log_file"),
+            health_path=info.get("health_path"),
+            created_at=_utcnow(),
+            updated_at=_utcnow(),
+        )
+        with self._session() as session:
+            session.add(record)
+            session.flush()
+            session.refresh(record)
+            session.expunge(record)
+        return self._to_deployment_dict(record)
+
+    def update_deployment(self, deployment_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
+        with self._session() as session:
+            record = session.get(DeploymentModel, deployment_id)
+            if record is None:
+                return None
+            for key, value in fields.items():
+                if key == "tags":
+                    setattr(record, "tags_json", _as_json(value))
+                else:
+                    setattr(record, key, value)
+            record.updated_at = _utcnow()
+            session.flush()
+            session.refresh(record)
+            session.expunge(record)
+        return self._to_deployment_dict(record)
+
+    def get_deployment(self, deployment_id: str) -> Optional[Dict[str, Any]]:
+        with self._session() as session:
+            record = session.get(DeploymentModel, deployment_id)
+            if record is None:
+                return None
+            session.expunge(record)
+        return self._to_deployment_dict(record)
+
+    def delete_deployment(self, deployment_id: str) -> None:
+        with self._session() as session:
+            record = session.get(DeploymentModel, deployment_id)
+            if record:
+                session.delete(record)
+
+    def list_deployments(
+        self,
+        *,
+        model: Optional[str] = None,
+        tag: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        with self._session() as session:
+            query = select(DeploymentModel)
+            if status:
+                query = query.where(DeploymentModel.status == status)
+            records = session.execute(query).scalars().all()
+            result: List[Dict[str, Any]] = []
+            for record in records:
+                payload = self._to_deployment_dict(record)
+                if model and model not in payload.get("model_path", ""):
+                    continue
+                if tag and tag not in payload.get("tags", []):
+                    continue
+                result.append(payload)
+        return result
+
+    # Conversion helpers -------------------------------------------------
+    def _to_dataset_record(self, dataset: Dataset) -> DatasetRecord:
+        files = [
+            DatasetFileEntry(
+                upload_id=file.upload_id,
+                name=file.name,
+                stored_name=file.stored_name,
+                bytes=file.bytes,
+                uploaded_at=file.uploaded_at,
+            )
+            for file in sorted(dataset.files, key=lambda item: item.uploaded_at)
+        ]
+        train_config = None
+        if dataset.train_config:
+            train_config = DatasetTrainConfig(
+                filename=dataset.train_config.filename,
+                uploaded_at=dataset.train_config.uploaded_at,
+                size=dataset.train_config.size,
+            )
+        return DatasetRecord(
+            id=dataset.id,
+            name=dataset.name,
+            dtype=dataset.dtype,
+            source=dataset.source,
+            task_type=dataset.task_type,
+            metadata=_from_json(dataset.metadata_json, {}),
+            created_at=dataset.created_at,
+            status=dataset.status,
+            files=files,
+            train_config=train_config,
+        )
+
+    def _to_project_summary(self, project: ProjectModel) -> Project:
+        return Project(
+            id=project.id,
+            name=project.name,
+            dataset_name=project.dataset_name,
+            training_yaml_name=project.training_yaml_name,
+            description=project.description,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
+
+    def _to_project_detail(
+        self, project: ProjectModel, runs: Iterable[RunModel]
+    ) -> ProjectDetail:
+        return ProjectDetail(
+            id=project.id,
+            name=project.name,
+            dataset_name=project.dataset_name,
+            training_yaml_name=project.training_yaml_name,
+            description=project.description,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+            runs=[self._to_run_detail(run) for run in runs],
+        )
+
+    def _to_run_detail(self, run: RunModel) -> RunDetail:
+        log_entries = [
+            LogEntry(timestamp=log.timestamp, level=log.level, message=log.message)
+            for log in sorted(run.logs, key=lambda item: item.timestamp)
+        ]
+        return RunDetail(
+            id=run.id,
+            project_id=run.project_id,
+            status=RunStatus(run.status),
+            progress=run.progress,
+            start_command=run.start_command,
+            created_at=run.created_at,
+            updated_at=run.updated_at,
+            logs=log_entries,
+        )
+
+    def _to_deployment_dict(self, record: DeploymentModel) -> Dict[str, Any]:
+        return {
+            "deployment_id": record.deployment_id,
+            "model_path": record.model_path,
+            "model_version": record.model_version,
+            "tags": _from_json(record.tags_json, []),
+            "gpu_id": record.gpu_id,
+            "port": record.port,
+            "pid": record.pid,
+            "status": record.status,
+            "started_at": record.started_at,
+            "stopped_at": record.stopped_at,
+            "health_ok": record.health_ok,
+            "vllm_cmd": record.vllm_cmd,
+            "log_file": record.log_file,
+            "health_path": record.health_path,
+        }
 
 
 __all__ = ["DatabaseStorage"]
