@@ -2,6 +2,33 @@
 
 本项目提供一个围绕大模型数据集管理、训练、部署与脱敏的 FastAPI 服务。所有业务接口均通过统一前缀 `/api` 暴露，除非另行说明。可选的环境变量、目录结构等配置可在 `app/config.py` 中调整。 【F:fastapi-app/app/config.py†L8-L68】
 
+## 快速启动
+
+1. **准备依赖**
+   ```bash
+   cd fastapi-app
+   python -m venv .venv
+   source .venv/bin/activate  # Windows 使用 .venv\\Scripts\\activate
+   pip install -r requirements.txt
+   ```
+   依赖列表可在 `requirements.txt` 中查看。 【F:fastapi-app/requirements.txt†L1-L5】
+   > **提示**：若在受限网络环境中无法下载依赖，可直接使用系统自带的 Python 环境运行 `python main.py`，前提是其已经预装 FastAPI/UVicorn。
+2. **运行服务**
+   - 使用 Python 模块入口：
+     ```bash
+     python -m fastapi-app.main
+     ```
+   - 或使用 `uvicorn` 工厂模式：
+     ```bash
+     uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
+     ```
+   入口脚本会创建 FastAPI 应用并监听 `0.0.0.0:8000`。 【F:fastapi-app/main.py†L1-L15】
+3. **验证服务已启动**
+   ```bash
+   curl http://localhost:8000/healthz
+   ```
+   如返回 `{"status": "ok", ...}` 则说明项目已成功运行。
+
 ## 健康检查
 
 ### `GET /healthz`
