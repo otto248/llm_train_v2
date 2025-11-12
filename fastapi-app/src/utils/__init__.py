@@ -3,45 +3,37 @@
 from __future__ import annotations
 
 import logging
-import shlex
 import subprocess
 from typing import Optional
 
-from .filesystem import ensure_directories
-
 
 def launch_training_process(
-    command: str,
+    start_command: str,
     *,
     host_training_dir: str,
     docker_container_name: str,
     docker_working_dir: str,
     log: Optional[logging.Logger] = None,
-) -> subprocess.Popen:
-    """Launch the training process via docker exec.
+) -> subprocess.Popen[bytes]:
+    """Launch a training process inside a Docker container."""
 
-    The implementation shells out to docker to keep the example simple. In a
-    production-ready setup this should be replaced with a task runner or job
-    scheduler integration.
-    """
-
-    ensure_directories(host_training_dir)
-    docker_command = [
-        "docker",
-        "exec",
-        docker_container_name,
-        "bash",
-        "-lc",
-        f"cd {shlex.quote(docker_working_dir)} && {command}",
-    ]
-    if log:
-        log.info("Launching training command: %s", command)
+    logger = log or logging.getLogger(__name__)
+    docker_command = (
+        f"cd {host_training_dir} && "
+        f"docker exec -i {docker_container_name} "
+        "env LANG=C.UTF-8 bash -lc "
+        f'"cd {docker_working_dir} && {start_command}"'
+    )
+    logger.info("Launching training command: %s", docker_command)
     try:
-        process = subprocess.Popen(docker_command)
-    except OSError as exc:  # pragma: no cover - depends on environment
-        if log:
-            log.error("Failed to launch training command: %s", exc)
-        raise RuntimeError("failed to launch training process") from exc
+        process = subprocess.Popen(  # noqa: S603, S607 - intentional command execution
+            ["bash", "-lc", docker_command],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:  # pragma: no cover - defensive guard
+        raise RuntimeError("无法执行训练命令，请检查服务器环境配置。") from exc
     return process
 
 
