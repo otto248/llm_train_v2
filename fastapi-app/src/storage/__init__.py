@@ -212,19 +212,16 @@ class DatabaseStorage:
         with self._session() as session:
             session.add(dataset)
             session.flush()
-        return self._to_dataset_record(dataset)
+            record = self._to_dataset_record(dataset)
+        return record
 
     def get_dataset(self, dataset_id: str) -> Optional[DatasetRecord]:
         with self._session() as session:
             dataset = session.get(Dataset, dataset_id)
             if dataset is None:
                 return None
-            session.expunge(dataset)
-            for file in dataset.files:
-                session.expunge(file)
-            if dataset.train_config:
-                session.expunge(dataset.train_config)
-        return self._to_dataset_record(dataset)
+            record = self._to_dataset_record(dataset)
+        return record
 
     def add_dataset_file(
         self,
@@ -263,12 +260,8 @@ class DatabaseStorage:
             dataset.updated_at = _utcnow()
             session.flush()
             session.refresh(dataset)
-            session.expunge(dataset)
-            for file in dataset.files:
-                session.expunge(file)
-            if dataset.train_config:
-                session.expunge(dataset.train_config)
-        return self._to_dataset_record(dataset)
+            record = self._to_dataset_record(dataset)
+        return record
 
     def remove_upload(self, upload_id: str) -> Optional[Dict[str, Any]]:
         with self._session() as session:
@@ -323,9 +316,8 @@ class DatabaseStorage:
             dataset.updated_at = _utcnow()
             session.flush()
             session.refresh(dataset)
-            session.expunge(dataset)
-            session.expunge(config_row)
-        return self._to_dataset_record(dataset)
+            record = self._to_dataset_record(dataset)
+        return record
 
     def clear_train_config(self, dataset_id: str) -> DatasetRecord:
         with self._session() as session:
@@ -339,8 +331,8 @@ class DatabaseStorage:
             dataset.updated_at = _utcnow()
             session.flush()
             session.refresh(dataset)
-            session.expunge(dataset)
-        return self._to_dataset_record(dataset)
+            record = self._to_dataset_record(dataset)
+        return record
 
     # Project operations -------------------------------------------------
     def create_project(self, payload: ProjectCreate) -> ProjectDetail:
