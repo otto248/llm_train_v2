@@ -17,7 +17,7 @@ from ..config import (
 )
 from ..dependencies import get_storage
 from ..models import LogEntry, Project, ProjectCreate, ProjectDetail, RunDetail, RunStatus
-from ..storage import DatabaseStorage
+from ..storage import FileStorage
 from ..utils import launch_training_process
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -65,7 +65,7 @@ def _ensure_project_assets_available(project: ProjectDetail) -> None:
 
 @router.post("", response_model=ProjectDetail, status_code=201)
 def create_project(
-    payload: ProjectCreate, store: DatabaseStorage = Depends(get_storage)
+    payload: ProjectCreate, store: FileStorage = Depends(get_storage)
 ) -> ProjectDetail:
     """创建新的训练项目（功能点 5.2.1）。"""
 
@@ -74,7 +74,7 @@ def create_project(
 
 
 @router.get("", response_model=List[Project])
-def list_projects(store: DatabaseStorage = Depends(get_storage)) -> List[Project]:
+def list_projects(store: FileStorage = Depends(get_storage)) -> List[Project]:
     """列出所有训练项目。"""
 
     return list(store.list_projects())
@@ -85,7 +85,7 @@ def create_run(
     project_reference: str = PathParam(
         ..., description="Project identifier or unique name"
     ),
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> RunDetail:
     """在指定项目下启动新的训练运行（功能点 5.2.3）。"""
 

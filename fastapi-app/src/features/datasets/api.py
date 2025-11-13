@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from app import config
 from app.deps import get_storage
 from src.models.datasets import DatasetCreateRequest, DatasetResponse
-from src.storage import DatabaseStorage
+from src.storage import FileStorage
 from src.utils.filesystem import ensure_directories
 
 router = APIRouter(prefix="/v1/datasets", tags=["datasets"])
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/v1/datasets", tags=["datasets"])
 
 @router.post("", response_model=Dict[str, Any], status_code=201)
 def create_dataset(
-    payload: DatasetCreateRequest, store: DatabaseStorage = Depends(get_storage)
+    payload: DatasetCreateRequest, store: FileStorage = Depends(get_storage)
 ) -> Dict[str, Any]:
     """Create a new dataset metadata entry."""
 
@@ -29,7 +29,7 @@ def create_dataset(
 
 
 @router.get("/{dataset_id}", response_model=DatasetResponse)
-def get_dataset(dataset_id: str, store: DatabaseStorage = Depends(get_storage)) -> DatasetResponse:
+def get_dataset(dataset_id: str, store: FileStorage = Depends(get_storage)) -> DatasetResponse:
     record = store.get_dataset(dataset_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
@@ -43,7 +43,7 @@ def get_dataset(dataset_id: str, store: DatabaseStorage = Depends(get_storage)) 
 async def upload_small_file(
     dataset_id: str,
     file: UploadFile = File(...),
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> Dict[str, Any]:
     record = store.get_dataset(dataset_id)
     if record is None:
@@ -78,7 +78,7 @@ async def upload_small_file(
 
 
 @router.delete("/uploads/{upload_id}")
-def abort_upload(upload_id: str, store: DatabaseStorage = Depends(get_storage)) -> Dict[str, Any]:
+def abort_upload(upload_id: str, store: FileStorage = Depends(get_storage)) -> Dict[str, Any]:
     """Abort an upload session and clean associated files."""
 
     upload_info = store.remove_upload(upload_id)
