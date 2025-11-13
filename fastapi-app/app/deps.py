@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from src.storage import DatabaseStorage
-from .config import METADATA_DATABASE_URL, METADATA_DB_PATH
+from src.storage import FileStorage
+from .config import METADATA_STORE_PATH
 
 
 @lru_cache(maxsize=1)
-def get_storage() -> DatabaseStorage:
+def get_storage() -> FileStorage:
     """Return a singleton instance of the storage backend."""
 
-    storage = DatabaseStorage(METADATA_DATABASE_URL, METADATA_DB_PATH)
+    storage = FileStorage(METADATA_STORE_PATH)
     return storage
 
 

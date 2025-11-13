@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from app import config
 from app.deps import get_storage
-from src.storage import DatabaseStorage
+from src.storage import FileStorage
 from src.utils.filesystem import ensure_directories
 
 try:  # pragma: no cover - optional dependency
@@ -168,7 +168,7 @@ def _check_http_health(port: int, path: str) -> bool:
 def create_deployment(
     payload: CreateDeploymentRequest,
     background: BackgroundTasks,
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> DeploymentInfo:
     _init_directories()
     gpu_id = _pick_gpu(payload.preferred_gpu)
@@ -236,7 +236,7 @@ def create_deployment(
         pid: int,
         port: int,
         path: str,
-        storage: DatabaseStorage,
+        storage: FileStorage,
     ) -> None:
         time.sleep(1.0)
         try:
@@ -274,7 +274,7 @@ def create_deployment(
 
 @router.get("/{deployment_id}", response_model=DeploymentInfo)
 def get_deployment(
-    deployment_id: str, store: DatabaseStorage = Depends(get_storage)
+    deployment_id: str, store: FileStorage = Depends(get_storage)
 ) -> DeploymentInfo:
     info = store.get_deployment(deployment_id)
     if not info:
@@ -304,7 +304,7 @@ def get_deployment(
 def delete_deployment(
     deployment_id: str,
     force: bool = False,
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> Dict[str, Any]:
     info = store.get_deployment(deployment_id)
     if not info:
@@ -361,7 +361,7 @@ def list_deployments(
     model: Optional[str] = None,
     tag: Optional[str] = None,
     status: Optional[str] = None,
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> List[DeploymentInfo]:
     records = store.list_deployments(
         model=model,

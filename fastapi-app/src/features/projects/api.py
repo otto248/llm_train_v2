@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from app import config
 from app.deps import get_storage
 from src.models import LogEntry, Project, ProjectCreate, ProjectDetail, RunDetail, RunStatus
-from src.storage import DatabaseStorage
+from src.storage import FileStorage
 from src.utils import launch_training_process
 from src.utils.filesystem import resolve_under_base
 
@@ -36,19 +36,19 @@ def _ensure_project_assets_available(project: ProjectDetail) -> None:
 
 
 @router.post("", response_model=ProjectDetail, status_code=201)
-def create_project(payload: ProjectCreate, store: DatabaseStorage = Depends(get_storage)) -> ProjectDetail:
+def create_project(payload: ProjectCreate, store: FileStorage = Depends(get_storage)) -> ProjectDetail:
     return store.create_project(payload)
 
 
 @router.get("", response_model=List[Project])
-def list_projects(store: DatabaseStorage = Depends(get_storage)) -> List[Project]:
+def list_projects(store: FileStorage = Depends(get_storage)) -> List[Project]:
     return list(store.list_projects())
 
 
 @router.post("/{project_reference}/runs", response_model=RunDetail, status_code=201)
 def create_run(
     project_reference: str = Path(..., description="Project identifier or unique name"),
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> RunDetail:
     project = store.get_project(project_reference)
     if project is None:

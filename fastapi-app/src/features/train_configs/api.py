@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from app import config
 from app.deps import get_storage
-from src.storage import DatabaseStorage
+from src.storage import FileStorage
 from src.utils.filesystem import ensure_directories
 
 router = APIRouter(prefix="/v1/datasets", tags=["train-configs"])
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/v1/datasets", tags=["train-configs"])
 async def upload_train_config(
     dataset_id: str,
     file: UploadFile = File(...),
-    store: DatabaseStorage = Depends(get_storage),
+    store: FileStorage = Depends(get_storage),
 ) -> Dict[str, Any]:
     record = store.get_dataset(dataset_id)
     if record is None:
@@ -47,7 +47,7 @@ async def upload_train_config(
 
 @router.get("/{dataset_id}/train-config", response_model=Dict[str, Any])
 def get_train_config(
-    dataset_id: str, store: DatabaseStorage = Depends(get_storage)
+    dataset_id: str, store: FileStorage = Depends(get_storage)
 ) -> Dict[str, Any]:
     record = store.get_dataset(dataset_id)
     if record is None:
@@ -63,7 +63,7 @@ def get_train_config(
 
 @router.delete("/{dataset_id}/train-config", response_model=Dict[str, Any])
 def delete_train_config(
-    dataset_id: str, store: DatabaseStorage = Depends(get_storage)
+    dataset_id: str, store: FileStorage = Depends(get_storage)
 ) -> Dict[str, Any]:
     record = store.get_dataset(dataset_id)
     if record is None:
