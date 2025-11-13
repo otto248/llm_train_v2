@@ -45,16 +45,20 @@ def _from_json(text: Optional[str], default: Any) -> Any:
     return json.loads(text)
 
 
+UUID_LENGTH = 36
+DEFAULT_STRING_LENGTH = 255
+
+
 class Dataset(Base):
     __tablename__ = "datasets"
 
-    id = Column(String, primary_key=True)
-    name = Column(String, nullable=False)
-    dtype = Column(String, nullable=True)
-    source = Column(String, nullable=True)
-    task_type = Column(String, nullable=True)
+    id = Column(String(UUID_LENGTH), primary_key=True)
+    name = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
+    dtype = Column(String(DEFAULT_STRING_LENGTH), nullable=True)
+    source = Column(String(DEFAULT_STRING_LENGTH), nullable=True)
+    task_type = Column(String(DEFAULT_STRING_LENGTH), nullable=True)
     metadata_json = Column(Text, nullable=True)
-    status = Column(String, default="created", nullable=False)
+    status = Column(String(50), default="created", nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -68,10 +72,12 @@ class DatasetFile(Base):
     __tablename__ = "dataset_files"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
-    upload_id = Column(String, unique=True, nullable=False)
-    name = Column(String, nullable=False)
-    stored_name = Column(String, nullable=False)
+    dataset_id = Column(
+        String(UUID_LENGTH), ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    upload_id = Column(String(DEFAULT_STRING_LENGTH), unique=True, nullable=False)
+    name = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
+    stored_name = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
     bytes = Column(Integer, nullable=False)
     uploaded_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
@@ -81,20 +87,24 @@ class DatasetFile(Base):
 class UploadSession(Base):
     __tablename__ = "upload_sessions"
 
-    upload_id = Column(String, primary_key=True)
-    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False)
-    filename = Column(String, nullable=False)
-    stored_filename = Column(String, nullable=False)
+    upload_id = Column(String(DEFAULT_STRING_LENGTH), primary_key=True)
+    dataset_id = Column(
+        String(UUID_LENGTH), ForeignKey("datasets.id", ondelete="CASCADE"), nullable=False
+    )
+    filename = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
+    stored_filename = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
     bytes = Column(Integer, nullable=False)
-    status = Column(String, default="completed", nullable=False)
+    status = Column(String(50), default="completed", nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
 
 class TrainConfig(Base):
     __tablename__ = "train_configs"
 
-    dataset_id = Column(String, ForeignKey("datasets.id", ondelete="CASCADE"), primary_key=True)
-    filename = Column(String, nullable=False)
+    dataset_id = Column(
+        String(UUID_LENGTH), ForeignKey("datasets.id", ondelete="CASCADE"), primary_key=True
+    )
+    filename = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
     uploaded_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     size = Column(Integer, nullable=False)
 
@@ -104,10 +114,10 @@ class TrainConfig(Base):
 class ProjectModel(Base):
     __tablename__ = "projects"
 
-    id = Column(String, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    dataset_name = Column(String, nullable=False)
-    training_yaml_name = Column(String, nullable=False)
+    id = Column(String(UUID_LENGTH), primary_key=True)
+    name = Column(String(DEFAULT_STRING_LENGTH), unique=True, nullable=False)
+    dataset_name = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
+    training_yaml_name = Column(String(DEFAULT_STRING_LENGTH), nullable=False)
     description = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -118,9 +128,11 @@ class ProjectModel(Base):
 class RunModel(Base):
     __tablename__ = "runs"
 
-    id = Column(String, primary_key=True)
-    project_id = Column(String, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
-    status = Column(String, default=RunStatus.PENDING.value, nullable=False)
+    id = Column(String(UUID_LENGTH), primary_key=True)
+    project_id = Column(
+        String(UUID_LENGTH), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    status = Column(String(50), default=RunStatus.PENDING.value, nullable=False)
     progress = Column(Float, default=0.0, nullable=False)
     start_command = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
@@ -134,9 +146,9 @@ class RunLogModel(Base):
     __tablename__ = "run_logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(String(UUID_LENGTH), ForeignKey("runs.id", ondelete="CASCADE"), nullable=False)
     timestamp = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
-    level = Column(String, nullable=False)
+    level = Column(String(50), nullable=False)
     message = Column(Text, nullable=False)
 
     run = relationship("RunModel", back_populates="logs")
@@ -145,20 +157,20 @@ class RunLogModel(Base):
 class DeploymentModel(Base):
     __tablename__ = "deployments"
 
-    deployment_id = Column(String, primary_key=True)
+    deployment_id = Column(String(UUID_LENGTH), primary_key=True)
     model_path = Column(Text, nullable=False)
-    model_version = Column(String, nullable=True)
+    model_version = Column(String(100), nullable=True)
     tags_json = Column(Text, nullable=True)
     gpu_id = Column(Integer, nullable=True)
     port = Column(Integer, nullable=False)
     pid = Column(Integer, nullable=True)
-    status = Column(String, nullable=False, default="starting")
+    status = Column(String(50), nullable=False, default="starting")
     started_at = Column(Float, nullable=True)
     stopped_at = Column(Float, nullable=True)
     health_ok = Column(Boolean, nullable=True)
     vllm_cmd = Column(Text, nullable=True)
     log_file = Column(Text, nullable=True)
-    health_path = Column(String, nullable=True)
+    health_path = Column(String(DEFAULT_STRING_LENGTH), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
 
