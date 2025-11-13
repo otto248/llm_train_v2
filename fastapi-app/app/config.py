@@ -11,8 +11,11 @@ DATASET_DIR = BASE_STORAGE_DIR / "datasets"
 FILES_DIR = BASE_STORAGE_DIR / "files"
 UPLOADS_DIR = BASE_STORAGE_DIR / "uploads"
 TRAIN_CONFIG_DIR = BASE_STORAGE_DIR / "train_configs"
-METADATA_DB_PATH = BASE_STORAGE_DIR / "metadata.db"
-METADATA_DATABASE_URL = f"sqlite:///{METADATA_DB_PATH}"
+_DEFAULT_METADATA_DB_PATH = BASE_STORAGE_DIR / "metadata.db"
+METADATA_DB_PATH = Path(os.environ.get("METADATA_DB_PATH", _DEFAULT_METADATA_DB_PATH))
+METADATA_DATABASE_URL = os.environ.get(
+    "METADATA_DATABASE_URL", f"sqlite:///{METADATA_DB_PATH}"
+)
 DEPLOY_LOG_DIR = Path(os.environ.get("DEPLOY_LOG_DIR", "./deploy_logs"))
 
 # File limits ---------------------------------------------------------------
