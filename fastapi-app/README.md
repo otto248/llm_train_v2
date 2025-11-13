@@ -2,26 +2,38 @@
 
 本项目提供一个围绕大模型数据集管理、训练、部署与脱敏的 FastAPI 服务。所有业务接口均通过统一前缀 `/api` 暴露，除非另行说明。可选的环境变量、目录结构等配置可在 `app/config.py` 中调整。 【F:fastapi-app/app/config.py†L8-L68】
 
-> **如何把 Postgres 配置传给应用？**
-> 1. 在部署环境（例如 Docker Compose）里设置 `METADATA_DATABASE_URL`，其格式遵循 SQLAlchemy/psycopg 连接串，例如：
+> **如何把 GoldenDB 配置传给应用？**
+> 1. 最快捷方式是设置完整的 `METADATA_DATABASE_URL`，示例（假设 GoldenDB 兼容 MySQL 协议并使用 PyMySQL 驱动）：
 >    ```env
->    METADATA_DATABASE_URL=postgresql+psycopg://app:secret123@postgres:5432/appdb
+>    METADATA_DATABASE_URL=mysql+pymysql://app:secret123@goldendb:3306/appdb
 >    ```
->    上面的例子对应于 Compose 中 `postgres` 服务暴露的数据库，用户名 `app`、密码 `secret123`、数据库名 `appdb`。
-> 2. 如有需要同时覆盖数据库文件路径，可设置 `METADATA_DB_PATH=/data/metadata.db`，但在 Postgres 场景下一般无需指定。
-> 3. 确认运行环境已经安装 `psycopg[binary]` 或 `psycopg2`，这样 SQLAlchemy 才能连接 Postgres。 【F:fastapi-app/app/config.py†L14-L18】
-> 
-> 在 Docker Compose 中可以通过 `environment:` 字段引用上述变量，例如：
-> ```yaml
-> services:
->   fastapi-app:
->     build: .
->     depends_on:
->       - postgres
->     environment:
->       METADATA_DATABASE_URL: "postgresql+psycopg://app:secret123@postgres:5432/appdb"
-> ```
-> 这样应用启动时会自动读取环境变量并使用 Postgres 作为元数据库。
+> 2. 若不想手写连接串，可改用 `GOLDENDB_*` 变量，应用会在启动时自动拼接：
+>    ```env
+>    GOLDENDB_HOST=goldendb
+>    GOLDENDB_PORT=3306
+>    GOLDENDB_USER=app
+>    GOLDENDB_PASSWORD=secret123
+>    GOLDENDB_DATABASE=appdb
+>    GOLDENDB_DRIVER=mysql+pymysql  # 可选，默认即为 mysql+pymysql
+>    ```
+>    当 `METADATA_DATABASE_URL` 未显式提供时，只要上述变量齐全就会自动生成连接字符串。 【F:fastapi-app/app/config.py†L16-L42】
+> 3. GoldenDB 采用 MySQL 协议时，需要在运行环境额外安装兼容驱动，例如：`pip install "pymysql>=1.1"`。
+
+在 Docker Compose 中可以通过 `environment:` 字段传入这些变量，例如：
+```yaml
+services:
+  fastapi-app:
+    build: .
+    depends_on:
+      - goldendb
+    environment:
+      GOLDENDB_HOST: goldendb
+      GOLDENDB_PORT: 3306
+      GOLDENDB_USER: app
+      GOLDENDB_PASSWORD: secret123
+      GOLDENDB_DATABASE: appdb
+```
+这样应用启动时会自动读取 GoldenDB 连接信息并切换到分布式数据库存储。若你更习惯直接指定 URL，也可以把上面五个变量换成单个 `METADATA_DATABASE_URL`。
 
 ## 快速启动
 
@@ -45,24 +57,30 @@
      ```
    入口脚本会创建 FastAPI 应用并监听 `0.0.0.0:8000`。 【F:fastapi-app/main.py†L1-L15】
 
-### 使用 `python main.py` 搭配 Postgres 调试
+### 使用 `python main.py` 搭配 GoldenDB 调试
 
-当你在本地直接运行 `python main.py` 进行调试时，只需在启动前导出 Postgres 连接串即可：
+当你在本地直接运行 `python main.py` 进行调试时，只需在启动前导出 GoldenDB 连接参数即可：
 
 ```bash
 cd fastapi-app
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-pip install "psycopg[binary]"  # 若 requirements.txt 中尚未包含 Postgres 驱动
+pip install "pymysql>=1.1"  # GoldenDB (MySQL 协议) 推荐驱动
 
-export METADATA_DATABASE_URL="postgresql+psycopg://app:secret123@localhost:5432/appdb"
+export GOLDENDB_HOST=127.0.0.1
+export GOLDENDB_PORT=3306
+export GOLDENDB_USER=app
+export GOLDENDB_PASSWORD=secret123
+export GOLDENDB_DATABASE=appdb
+# 或者直接： export METADATA_DATABASE_URL="mysql+pymysql://app:secret123@127.0.0.1:3306/appdb"
+
 python main.py
 ```
 
-- `METADATA_DATABASE_URL` 的值需要与你 Docker Compose 中的用户名、密码、端口保持一致；若 Postgres 运行在同一台机器上，可直接指向 `localhost`。
-- 入口脚本会读取上面的环境变量，通过 `app/config.py` 中的配置切换到 Postgres 元数据存储，无需额外代码改动。 【F:fastapi-app/app/config.py†L8-L24】
+- 若 Docker/物理机中的 GoldenDB 已经运行在本地，可直接使用 `127.0.0.1`；否则把 `GOLDENDB_HOST`/URL 换成实际的服务地址。
+- 启动脚本会读取上述变量，通过 `app/config.py` 自动拼接 SQLAlchemy URL 并切换到 GoldenDB 存储，无需其它代码改动。 【F:fastapi-app/app/config.py†L8-L38】
 
-调试结束后可以使用 `deactivate` 退出虚拟环境。若希望长期保存该环境变量，可将其写入 `.env` 或 shell 启动脚本中。
+调试结束后可以使用 `deactivate` 退出虚拟环境。若希望长期保存这些环境变量，可将其写入 `.env` 或 shell 启动脚本中。
 3. **验证服务已启动**
    ```bash
    curl http://localhost:8000/healthz

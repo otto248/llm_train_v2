@@ -164,7 +164,7 @@ class DeploymentModel(Base):
 
 
 class DatabaseStorage:
-    """High-level storage abstraction backed by SQLite via SQLAlchemy."""
+    """High-level storage abstraction backed by SQLAlchemy."""
 
     def __init__(self, database_url: str, database_path: Path):
         ensure_directories(database_path.parent)

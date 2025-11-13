@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote_plus
 
 # Storage roots -------------------------------------------------------------
 BASE_STORAGE_DIR = Path(os.environ.get("LLM_APP_STORAGE", "./storage"))
@@ -13,8 +14,39 @@ UPLOADS_DIR = BASE_STORAGE_DIR / "uploads"
 TRAIN_CONFIG_DIR = BASE_STORAGE_DIR / "train_configs"
 _DEFAULT_METADATA_DB_PATH = BASE_STORAGE_DIR / "metadata.db"
 METADATA_DB_PATH = Path(os.environ.get("METADATA_DB_PATH", _DEFAULT_METADATA_DB_PATH))
-METADATA_DATABASE_URL = os.environ.get(
-    "METADATA_DATABASE_URL", f"sqlite:///{METADATA_DB_PATH}"
+
+
+def _goldendb_url_from_env() -> str | None:
+    """Build a GoldenDB/MySQL SQLAlchemy URL from granular env vars.
+
+    Allows deployments to specify credentials with ``GOLDENDB_*`` variables
+    instead of crafting the SQLAlchemy URL manually. Returns ``None`` when
+    the minimum set of variables is not present.
+    """
+
+    host = os.environ.get("GOLDENDB_HOST")
+    user = os.environ.get("GOLDENDB_USER")
+    database = os.environ.get("GOLDENDB_DATABASE") or os.environ.get("GOLDENDB_DB")
+    if not (host and user and database):
+        return None
+
+    password = os.environ.get("GOLDENDB_PASSWORD")
+    port = os.environ.get("GOLDENDB_PORT", "3306")
+    driver = os.environ.get("GOLDENDB_DRIVER", "mysql+pymysql")
+
+    if password:
+        credentials = f"{quote_plus(user)}:{quote_plus(password)}"
+    else:
+        credentials = quote_plus(user)
+
+    return f"{driver}://{credentials}@{host}:{port}/{database}"
+
+
+_DEFAULT_METADATA_DATABASE_URL = f"sqlite:///{METADATA_DB_PATH}"
+METADATA_DATABASE_URL = (
+    os.environ.get("METADATA_DATABASE_URL")
+    or _goldendb_url_from_env()
+    or _DEFAULT_METADATA_DATABASE_URL
 )
 DEPLOY_LOG_DIR = Path(os.environ.get("DEPLOY_LOG_DIR", "./deploy_logs"))
 
