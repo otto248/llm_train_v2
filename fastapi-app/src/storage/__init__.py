@@ -19,12 +19,19 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    func,
     select,
 )
 from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
 from src.models import LogEntry, Project, ProjectCreate, ProjectDetail, RunDetail, RunStatus
-from src.models.datasets import DatasetCreateRequest, DatasetFileEntry, DatasetRecord, DatasetTrainConfig
+from src.models.datasets import (
+    DatasetCreateRequest,
+    DatasetFileEntry,
+    DatasetMetadata,
+    DatasetRecord,
+    DatasetTrainConfig,
+)
 from src.utils.filesystem import ensure_directories
 
 
@@ -198,13 +205,14 @@ class DatabaseStorage:
 
     # Dataset operations -------------------------------------------------
     def create_dataset(self, payload: DatasetCreateRequest) -> DatasetRecord:
+        metadata = payload.metadata or DatasetMetadata()
         dataset = Dataset(
             id=str(uuid4()),
             name=payload.name,
             dtype=payload.dtype,
             source=payload.source,
             task_type=payload.task_type,
-            metadata_json=_as_json(payload.metadata or {}),
+            metadata_json=_as_json(metadata.model_dump(exclude_none=True)),
             status="created",
             created_at=_utcnow(),
             updated_at=_utcnow(),
@@ -259,6 +267,8 @@ class DatabaseStorage:
             dataset.status = "ready"
             dataset.updated_at = _utcnow()
             session.flush()
+            self._recalculate_dataset_file_metadata(session, dataset)
+            session.flush()
             session.refresh(dataset)
             record = self._to_dataset_record(dataset)
         return record
@@ -277,8 +287,9 @@ class DatabaseStorage:
             if file:
                 session.delete(file)
             session.delete(upload)
+            metadata = self._recalculate_dataset_file_metadata(session, dataset)
             dataset.updated_at = _utcnow()
-            if dataset.files:
+            if metadata.total_files:
                 dataset.status = "ready"
             else:
                 dataset.status = "created"
@@ -312,6 +323,9 @@ class DatabaseStorage:
                 config_row.filename = filename
                 config_row.uploaded_at = uploaded_at
                 config_row.size = size
+            metadata = self._get_dataset_metadata(dataset)
+            metadata.has_train_config = True
+            self._set_dataset_metadata(dataset, metadata)
             dataset.status = "train_config_uploaded"
             dataset.updated_at = _utcnow()
             session.flush()
@@ -327,12 +341,38 @@ class DatabaseStorage:
             config_row = session.get(TrainConfig, dataset_id)
             if config_row:
                 session.delete(config_row)
+            metadata = self._get_dataset_metadata(dataset)
+            metadata.has_train_config = False
+            self._set_dataset_metadata(dataset, metadata)
             dataset.status = "train_config_deleted"
             dataset.updated_at = _utcnow()
             session.flush()
             session.refresh(dataset)
             record = self._to_dataset_record(dataset)
         return record
+
+    # Internal helpers ---------------------------------------------------
+    def _get_dataset_metadata(self, dataset: Dataset) -> DatasetMetadata:
+        raw = _from_json(dataset.metadata_json, {})
+        return DatasetMetadata.model_validate(raw)
+
+    def _set_dataset_metadata(self, dataset: Dataset, metadata: DatasetMetadata) -> None:
+        dataset.metadata_json = _as_json(metadata.model_dump(exclude_none=True))
+
+    def _recalculate_dataset_file_metadata(
+        self, session: Session, dataset: Dataset
+    ) -> DatasetMetadata:
+        total_files, total_bytes = session.execute(
+            select(
+                func.count(DatasetFile.id),
+                func.coalesce(func.sum(DatasetFile.bytes), 0),
+            ).where(DatasetFile.dataset_id == dataset.id)
+        ).one()
+        metadata = self._get_dataset_metadata(dataset)
+        metadata.total_files = int(total_files or 0)
+        metadata.total_bytes = int(total_bytes or 0)
+        self._set_dataset_metadata(dataset, metadata)
+        return metadata
 
     # Project operations -------------------------------------------------
     def create_project(self, payload: ProjectCreate) -> ProjectDetail:
@@ -561,13 +601,14 @@ class DatabaseStorage:
                 uploaded_at=dataset.train_config.uploaded_at,
                 size=dataset.train_config.size,
             )
+        metadata = DatasetMetadata.model_validate(_from_json(dataset.metadata_json, {}))
         return DatasetRecord(
             id=dataset.id,
             name=dataset.name,
             dtype=dataset.dtype,
             source=dataset.source,
             task_type=dataset.task_type,
-            metadata=_from_json(dataset.metadata_json, {}),
+            metadata=metadata,
             created_at=dataset.created_at,
             status=dataset.status,
             files=files,

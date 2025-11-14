@@ -5,7 +5,22 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DatasetMetadata(BaseModel):
+    """Structured metadata persisted alongside dataset records."""
+
+    model_config = ConfigDict(extra="allow")
+
+    description: Optional[str] = None
+    version: Optional[str] = None
+    records: Optional[int] = Field(default=None, ge=0)
+    license: Optional[str] = None
+    tags: List[str] = Field(default_factory=list)
+    total_files: int = Field(default=0, ge=0)
+    total_bytes: int = Field(default=0, ge=0)
+    has_train_config: bool = False
 
 
 class DatasetCreateRequest(BaseModel):
@@ -18,7 +33,7 @@ class DatasetCreateRequest(BaseModel):
     )
     source: Optional[str] = None
     task_type: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: Optional[DatasetMetadata] = None
 
 
 class DatasetFileEntry(BaseModel):
@@ -46,7 +61,7 @@ class DatasetRecord(BaseModel):
     )
     source: Optional[str] = None
     task_type: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata: DatasetMetadata = Field(default_factory=DatasetMetadata)
     created_at: datetime
     status: str
     files: List[DatasetFileEntry] = Field(default_factory=list)
@@ -58,6 +73,7 @@ class DatasetResponse(DatasetRecord):
 
 
 __all__ = [
+    "DatasetMetadata",
     "DatasetCreateRequest",
     "DatasetFileEntry",
     "DatasetRecord",
