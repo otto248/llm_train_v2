@@ -260,7 +260,8 @@
 接口统一前缀：`/api/projects`。
 
 ### `POST /api/projects`
-- **功能**：创建项目并记录数据集/训练配置引用。 【F:fastapi-app/src/features/projects/api.py†L18-L40】
+- **功能**：创建项目并记录数据集/训练配置引用。 【F:fastapi-app/src/features/projects/api.py†L38-L41】
+- **实现说明**：处理函数调用 `DatabaseStorage.create_project`，会将信息立即写入 SQLite `projects` 表。 【F:fastapi-app/src/features/projects/api.py†L38-L41】【F:fastapi-app/src/storage/__init__.py†L345-L362】
 - **入参**（JSON）：
   ```json
   {
@@ -288,7 +289,8 @@
   ```
 
 ### `POST /api/projects/{project_reference}/runs`
-- **功能**：为指定项目创建一次训练运行；支持使用项目 ID 或名称查找，并会校验所需数据/配置文件是否存在后通过 `docker exec` 启动训练。 【F:fastapi-app/src/features/projects/api.py†L48-L108】
+- **功能**：为指定项目创建一次训练运行；支持使用项目 ID 或名称查找，并会校验所需数据/配置文件是否存在后通过 `docker exec` 启动训练。 【F:fastapi-app/src/features/projects/api.py†L48-L110】
+- **实现说明**：在触发外部训练命令前，接口会通过 `DatabaseStorage.create_run` 持久化一条 `runs` 记录并写入初始日志，后续状态更新同样通过数据库保存。 【F:fastapi-app/src/features/projects/api.py†L61-L108】【F:fastapi-app/src/storage/__init__.py†L398-L416】
 - **入参**：
   - 路径参数 `project_reference`（项目 ID 或名称）
 - **出参**：`RunDetail`，包含启动命令、运行状态、日志等。

@@ -37,6 +37,8 @@ def _ensure_project_assets_available(project: ProjectDetail) -> None:
 
 @router.post("", response_model=ProjectDetail, status_code=201)
 def create_project(payload: ProjectCreate, store: DatabaseStorage = Depends(get_storage)) -> ProjectDetail:
+    """Persist a project record via :class:`DatabaseStorage`."""
+
     return store.create_project(payload)
 
 
@@ -50,6 +52,8 @@ def create_run(
     project_reference: str = Path(..., description="Project identifier or unique name"),
     store: DatabaseStorage = Depends(get_storage),
 ) -> RunDetail:
+    """Create a run row in the ``runs`` table before launching the training process."""
+
     project = store.get_project(project_reference)
     if project is None:
         project = store.get_project_by_name(project_reference)
