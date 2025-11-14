@@ -52,7 +52,16 @@
     "type": "可选，数据类型",
     "source": "可选，来源",
     "task_type": "可选，任务类型",
-    "metadata": {"自定义": "键值"}
+    "metadata": {
+      "description": "可选，数据集描述",
+      "version": "可选，版本号",
+      "records": 10000,
+      "license": "可选，授权信息",
+      "tags": ["finance", "cn"],
+      "total_files": 0,
+      "total_bytes": 0,
+      "has_train_config": false
+    }
   }
   ```
 - **出参**：`{"id": "<dataset_id>", "created_at": "ISO 时间"}`。
@@ -74,7 +83,16 @@
     "type": "...",
     "source": "...",
     "task_type": "...",
-    "metadata": {},
+    "metadata": {
+      "description": "...",
+      "version": "...",
+      "records": 10000,
+      "license": "...",
+      "tags": ["finance"],
+      "total_files": 1,
+      "total_bytes": 123456,
+      "has_train_config": false
+    },
     "created_at": "...",
     "status": "...",
     "files": [
@@ -95,6 +113,7 @@
   - 路径参数 `dataset_id`
   - 表单文件字段 `file`
 - **出参**：`{"upload_id": "...", "dataset_id": "...", "bytes": 123, "filename": "原文件名"}`。
+- **说明**：每次上传/删除文件都会自动刷新 `metadata.total_files` 与 `metadata.total_bytes`。
 - **调用示例**：
   ```bash
   curl -X PUT http://localhost:8000/api/v1/datasets/abcd-1234/files \
@@ -118,6 +137,7 @@
 - **入参**：
   - 路径参数 `dataset_id`
   - 表单文件字段 `file`（扩展名 `.yaml`/`.yml`）
+- **说明**：上传/删除训练配置会同步更新数据集元信息中的 `metadata.has_train_config`。
 - **出参**：`{"dataset_id": "...", "train_config": {"filename": "...", "uploaded_at": "...", "size": 123}}`。
 - **调用示例**：
   ```bash
