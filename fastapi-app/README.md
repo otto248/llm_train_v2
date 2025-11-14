@@ -129,6 +129,39 @@
 
 > **提示**：以上字段名称为平台推荐约定，后端不会强制校验，但训练容器必须能够识别这些配置。若扩展新范式，请保持 `ProjectCreate.training_yaml_name` 与实际脚本一致，同时确保脚本产出的模型、指标路径在日志或返回值中可追踪。
 
+> **如何把 GoldenDB 配置传给应用？**
+> 1. 最快捷方式是设置完整的 `METADATA_DATABASE_URL`，示例（假设 GoldenDB 兼容 MySQL 协议并使用 PyMySQL 驱动）：
+>    ```env
+>    METADATA_DATABASE_URL=mysql+pymysql://app:secret123@goldendb:3306/appdb
+>    ```
+> 2. 若不想手写连接串，可改用 `GOLDENDB_*` 变量，应用会在启动时自动拼接：
+>    ```env
+>    GOLDENDB_HOST=goldendb
+>    GOLDENDB_PORT=3306
+>    GOLDENDB_USER=app
+>    GOLDENDB_PASSWORD=secret123
+>    GOLDENDB_DATABASE=appdb
+>    GOLDENDB_DRIVER=mysql+pymysql  # 可选，默认即为 mysql+pymysql
+>    ```
+>    当 `METADATA_DATABASE_URL` 未显式提供时，只要上述变量齐全就会自动生成连接字符串。 【F:fastapi-app/app/config.py†L16-L42】
+> 3. GoldenDB 采用 MySQL 协议时，需要在运行环境额外安装兼容驱动，例如：`pip install "pymysql>=1.1"`。
+
+在 Docker Compose 中可以通过 `environment:` 字段传入这些变量，例如：
+```yaml
+services:
+  fastapi-app:
+    build: .
+    depends_on:
+      - goldendb
+    environment:
+      GOLDENDB_HOST: goldendb
+      GOLDENDB_PORT: 3306
+      GOLDENDB_USER: app
+      GOLDENDB_PASSWORD: secret123
+      GOLDENDB_DATABASE: appdb
+```
+这样应用启动时会自动读取 GoldenDB 连接信息并切换到分布式数据库存储。若你更习惯直接指定 URL，也可以把上面五个变量换成单个 `METADATA_DATABASE_URL`。
+
 ## 快速启动
 
 1. **准备依赖**
@@ -150,6 +183,31 @@
      uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
      ```
    入口脚本会创建 FastAPI 应用并监听 `0.0.0.0:8000`。 【F:fastapi-app/main.py†L1-L15】
+
+### 使用 `python main.py` 搭配 GoldenDB 调试
+
+当你在本地直接运行 `python main.py` 进行调试时，只需在启动前导出 GoldenDB 连接参数即可：
+
+```bash
+cd fastapi-app
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+pip install "pymysql>=1.1"  # GoldenDB (MySQL 协议) 推荐驱动
+
+export GOLDENDB_HOST=127.0.0.1
+export GOLDENDB_PORT=3306
+export GOLDENDB_USER=app
+export GOLDENDB_PASSWORD=secret123
+export GOLDENDB_DATABASE=appdb
+# 或者直接： export METADATA_DATABASE_URL="mysql+pymysql://app:secret123@127.0.0.1:3306/appdb"
+
+python main.py
+```
+
+- 若 Docker/物理机中的 GoldenDB 已经运行在本地，可直接使用 `127.0.0.1`；否则把 `GOLDENDB_HOST`/URL 换成实际的服务地址。
+- 启动脚本会读取上述变量，通过 `app/config.py` 自动拼接 SQLAlchemy URL 并切换到 GoldenDB 存储，无需其它代码改动。 【F:fastapi-app/app/config.py†L8-L38】
+
+调试结束后可以使用 `deactivate` 退出虚拟环境。若希望长期保存这些环境变量，可将其写入 `.env` 或 shell 启动脚本中。
 3. **验证服务已启动**
    ```bash
    curl http://localhost:8000/healthz
