@@ -2,6 +2,100 @@
 
 本项目提供一个围绕大模型数据集管理、训练、部署与脱敏的 FastAPI 服务。所有业务接口均通过统一前缀 `/api` 暴露，除非另行说明。可选的环境变量、目录结构等配置可在 `app/config.py` 中调整。 【F:fastapi-app/app/config.py†L8-L68】
 
+## 训练任务文件准备概览
+
+平台默认将所有训练资源挂载到 `HOST_TRAINING_DIR`（默认 `./training`）下，并在此目录中查找项目引用的数据文件、训练配置与启动脚本。【F:fastapi-app/app/config.py†L25-L31】【F:fastapi-app/src/features/projects/api.py†L70-L108】建议在宿主机或共享存储中采用如下目录结构，便于通过 API 进行引用：
+
+```
+training/
+├── datasets/
+│   ├── sft_demo.jsonl
+│   └── rl_pairs.jsonl
+├── configs/
+│   ├── sft_config.yaml
+│   ├── lora_config.yaml
+│   └── rl_config.yaml
+└── scripts/
+    ├── run_train_full_sft.sh
+    ├── run_train_full_lora.sh
+    └── run_train_full_rl.sh
+```
+
+- 通过 `/api/v1/datasets` 上传的数据文件最终也会落盘在 `BASE_STORAGE_DIR/datasets` 下，可通过文件名在训练项目中引用。【F:fastapi-app/app/config.py†L8-L27】【F:fastapi-app/src/features/datasets/api.py†L106-L150】
+- 训练配置 YAML 可由 `/api/v1/datasets/{dataset_id}/train-config` 接口上传，系统会同步更新元信息中的 `training_yaml_name` 并在触发训练时进行校验。【F:fastapi-app/src/features/train_configs/api.py†L17-L61】【F:fastapi-app/src/features/projects/api.py†L70-L108】
+- 默认情况下，项目运行会拼接命令 `bash run_train_full_sft.sh <training_yaml_name>`，因此需在 `scripts/` 中准备同名入口；如需支持 LoRA/RLHF，可根据项目约定扩展启动脚本并在 YAML 内保持一致，以便日志中可见真实命令。【F:fastapi-app/src/features/projects/api.py†L19-L108】
+
+### 模型输入输出与文件格式约定
+
+训练接口通过 `ProjectCreate` 请求体接收以下字段：`name`、`dataset_name`、`training_yaml_name`、`description`（可选）。接口返回 `ProjectDetail` 与 `RunDetail`，其中会记录运行状态、日志与 `start_command`，便于追踪不同训练范式的执行情况。【F:fastapi-app/src/models/__init__.py†L22-L57】【F:fastapi-app/src/features/projects/api.py†L18-L108】
+
+为确保 SFT、LoRA 与 RLHF 任务可以顺利执行，建议遵循下列文件格式与输出规范：
+
+#### SFT（监督微调）
+
+- **数据格式**：使用 UTF-8 编码的 `.jsonl` 文件，每行一个 JSON 对象，推荐字段：
+  ```json
+  {"instruction": "写一首诗", "input": "主题：春天", "output": "春风拂面..."}
+  ```
+  `instruction` 可选，若为空可以仅保留 `input` 与 `output`；多轮对话可将历史拼接进 `input`。
+- **训练配置**：在 YAML 顶层声明 `job.type: sft`，同时提供 `model`, `training`, `evaluation`（可选）等段落，例如：
+  ```yaml
+  job:
+    type: sft
+    project: spring-poem
+  model:
+    base: qwen-7b
+  training:
+    max_steps: 1000
+    learning_rate: 5e-5
+    per_device_train_batch_size: 4
+  ```
+- **运行输出**：默认脚本 `run_train_full_sft.sh` 需在训练目录内生成模型权重、日志与指标文件（例如 `checkpoints/`、`runs/` 目录），API 侧会把 stdout/stderr 采集成 `RunDetail.logs` 供前端展示。【F:fastapi-app/src/models/__init__.py†L35-L57】
+
+#### LoRA 适配
+
+- **数据格式**：沿用 SFT 的 `.jsonl` 结构，确保字段名一致，便于共用数据预处理流水线。
+- **训练配置**：在 YAML 中声明 `job.type: lora`，并新增 `lora` 段落描述秩、α 等超参：
+  ```yaml
+  job:
+    type: lora
+  model:
+    base: qwen-7b
+  lora:
+    r: 8
+    alpha: 16
+    target_modules: [query_key_value]
+  training:
+    max_steps: 800
+  ```
+  如需合并权重，可在脚本中处理并在日志中输出生成路径。
+- **运行输出**：`run_train_full_lora.sh` 应至少产出 LoRA 适配权重（如 `adapter_model.bin`）和训练日志。运行过程中产生的命令会记录在 `RunDetail.start_command`，便于审计所使用的脚本与参数。【F:fastapi-app/src/features/projects/api.py†L70-L108】
+
+#### RLHF / PPO
+
+- **数据格式**：推荐使用 `.jsonl` 偏好对或打分数据：
+  ```json
+  {"prompt": "写一首俳句", "chosen": "春雨细无声", "rejected": "天气不错"}
+  ```
+  若使用打分样本，可改为 `{ "prompt": "...", "response": "...", "score": 0.75 }`。
+- **训练配置**：在 YAML 中指定 `job.type: rl`（或更具体的 `ppo`），并提供奖励模型/参考模型：
+  ```yaml
+  job:
+    type: rl
+    method: ppo
+  model:
+    policy: qwen-7b-sft
+    reference: qwen-7b-sft
+    reward: reward-model-v1
+  training:
+    rollout_batch_size: 8
+    kl_coeff: 0.1
+  ```
+  可选的 `evaluation`、`checkpoint` 段落用于控制评估及保存频率。
+- **运行输出**：`run_train_full_rl.sh` 需记录关键指标（如 KL、奖励值、平均长度）到日志中，以便 API 在 `RunDetail.logs` 中回放；模型与奖励权重保存路径可写入日志或导出为约定目录结构供部署使用。【F:fastapi-app/src/models/__init__.py†L35-L57】
+
+> **提示**：以上字段名称为平台推荐约定，后端不会强制校验，但训练容器必须能够识别这些配置。若扩展新范式，请保持 `ProjectCreate.training_yaml_name` 与实际脚本一致，同时确保脚本产出的模型、指标路径在日志或返回值中可追踪。
+
 ## 快速启动
 
 1. **准备依赖**
@@ -309,20 +403,7 @@
 
 ### 模型训练模式输入输出说明
 
-为了支持不同的训练范式（SFT、LoRA、RLHF），训练相关接口在创建项目与触发运行时遵循统一的输入/输出模型：
-
-- **输入模型**：`ProjectCreate` 请求体，字段为 `name`、`dataset_name`、`training_yaml_name`、`description`（可选）。模型类型通过 `training_yaml_name` 指向的配置文件内部字段决定，而非额外的 API 参数。【F:fastapi-app/src/models/__init__.py†L22-L33】【F:fastapi-app/src/features/projects/api.py†L38-L45】
-- **输出模型**：创建成功返回 `ProjectDetail`；启动运行后返回 `RunDetail`，包含 `status`、`progress`、`start_command` 与实时日志条目。【F:fastapi-app/src/models/__init__.py†L35-L57】【F:fastapi-app/src/features/projects/api.py†L64-L107】
-
-下表总结了三种常见训练模式在配置与数据上的约定：
-
-| 训练模式 | 训练配置 (`training_yaml_name`) 关键字段 | 数据文件 (`dataset_name`) 约定 | 运行时 `start_command` 期望 |
-| -------- | ------------------------------------- | ----------------------------- | --------------------------- |
-| **SFT（监督微调）** | 在 YAML 中声明 `job.type: sft` 或等效字段，配置基座模型、学习率、批大小等；可选 `evaluation`、`push_to_hub` 等段落 | 推荐使用 `.jsonl` 文件，每行包含 `instruction`（可选）、`input`、`output` 字段 | 默认命令为 `bash run_train_full_sft.sh <training_yaml_name>`；如需自定义脚本，可在 YAML 中维护相同入口 |
-| **LoRA 适配** | YAML 顶层需包含 `job.type: lora`，并在 `lora` 节内指定秩、α、target modules；仍可复用 SFT 的优化器/调度器配置 | 仍采用 `.jsonl` 指令数据结构，通常与 SFT 共用；若存在额外权重初始化需求，可在 YAML 里指明 | 建议提供 `run_train_full_lora.sh` 等脚本并在 YAML 中保持与 `start_command` 一致，最终返回的 `RunDetail.start_command` 将反映实际调用命令 |
-| **RLHF / PPO** | YAML 须声明 `job.type: rl`（例如 `ppo`），并提供奖励模型、参考模型、PPO 超参；可包含评估/检查点策略 | 数据集应当提供偏好对或打分对，示例 `.jsonl` 字段：`prompt`、`chosen`、`rejected` 或 `response`, `score` | 需准备对应脚本（如 `run_train_full_rl.sh`）；接口返回的 `start_command` 可用于审计启动参数 |
-
-> **提示**：上述 YAML 与数据字段是推荐约定，后端不会强制校验字段名，但训练容器必须能够识别这些配置。若需要扩展其它任务类型，可继续沿用同一接口规范，只需保证 `training_yaml_name` 指向的配置与运行脚本一致。
+关于 SFT、LoRA 与 RLHF 三种训练方式的文件准备、配置示例及运行输出，请参考文档开头的「训练任务文件准备概览」章节。训练接口在创建项目与触发运行时依旧使用统一的 `ProjectCreate`/`ProjectDetail`/`RunDetail` 数据模型，具体字段含义与日志呈现方式见上文说明。【F:fastapi-app/src/models/__init__.py†L22-L57】【F:fastapi-app/src/features/projects/api.py†L18-L108】
 
 ### `POST /api/projects/{project_reference}/runs`
 - **功能**：为指定项目创建一次训练运行；支持使用项目 ID 或名称查找，并会校验所需数据/配置文件是否存在后通过 `docker exec` 启动训练。 【F:fastapi-app/src/features/projects/api.py†L48-L108】
