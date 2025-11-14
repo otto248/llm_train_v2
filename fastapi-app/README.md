@@ -1,43 +1,76 @@
 # LLM Platform FastAPI 服务文档
 
-本项目提供一个围绕大模型数据集管理、训练、部署与脱敏的 FastAPI 服务。所有业务接口均通过统一前缀 `/api` 暴露，除非另行说明。可选的环境变量、目录结构等配置可在 `app/config.py` 中调整。 【F:fastapi-app/app/config.py†L8-L68】
+本项目提供一个围绕大模型数据集管理、训练、部署与脱敏的 FastAPI 服务。所有业务接口均通过统一前缀 `/api` 暴露，除非另行说明。可选的环境变量、目录结构等配置可在 `app/config.py` 中调整。 
 
 ## 训练任务文件准备概览
 
-平台默认将所有训练资源挂载到 `HOST_TRAINING_DIR`（默认 `./training`）下，并在此目录中查找项目引用的数据文件、训练配置与启动脚本。【F:fastapi-app/app/config.py†L25-L31】【F:fastapi-app/src/features/projects/api.py†L70-L108】建议在宿主机或共享存储中采用如下目录结构，便于通过 API 进行引用：
+平台默认将所有训练资源挂载到 `HOST_TRAINING_DIR`（默认 `./training`）下，并在此目录中查找项目引用的数据文件、训练配置与启动脚本。
 
-```
-training/
-├── datasets/
-│   ├── sft_demo.jsonl
-│   └── rl_pairs.jsonl
-├── configs/
-│   ├── sft_config.yaml
-│   ├── lora_config.yaml
-│   └── rl_config.yaml
-└── scripts/
-    ├── run_train_full_sft.sh
-    ├── run_train_full_lora.sh
-    └── run_train_full_rl.sh
-```
-
-- 通过 `/api/v1/datasets` 上传的数据文件最终也会落盘在 `BASE_STORAGE_DIR/datasets` 下，可通过文件名在训练项目中引用。【F:fastapi-app/app/config.py†L8-L27】【F:fastapi-app/src/features/datasets/api.py†L106-L150】
-- 训练配置 YAML 可由 `/api/v1/datasets/{dataset_id}/train-config` 接口上传，系统会同步更新元信息中的 `training_yaml_name` 并在触发训练时进行校验。【F:fastapi-app/src/features/train_configs/api.py†L17-L61】【F:fastapi-app/src/features/projects/api.py†L70-L108】
-- 默认情况下，项目运行会拼接命令 `bash run_train_full_sft.sh <training_yaml_name>`，因此需在 `scripts/` 中准备同名入口；如需支持 LoRA/RLHF，可根据项目约定扩展启动脚本并在 YAML 内保持一致，以便日志中可见真实命令。【F:fastapi-app/src/features/projects/api.py†L19-L108】
-
-### 模型输入输出与文件格式约定
-
-训练接口通过 `ProjectCreate` 请求体接收以下字段：`name`、`dataset_name`、`training_yaml_name`、`description`（可选）。接口返回 `ProjectDetail` 与 `RunDetail`，其中会记录运行状态、日志与 `start_command`，便于追踪不同训练范式的执行情况。【F:fastapi-app/src/models/__init__.py†L22-L57】【F:fastapi-app/src/features/projects/api.py†L18-L108】
+- 通过 `/api/v1/datasets` 上传的数据文件最终也会落盘在 `BASE_STORAGE_DIR/datasets` 下，可通过文件名在训练项目中引用。
+- 训练配置 YAML 可由 `/api/v1/datasets/{dataset_id}/train-config` 接口上传，系统会同步更新元信息中的 `training_yaml_name` 并在触发训练时进行校验。
+- 默认情况下，项目运行会拼接命令 `bash run_train_full_sft.sh <training_yaml_name>`，因此需在 `scripts/` 中准备同名入口；如需支持 LoRA/RLHF，可根据项目约定扩展启动脚本并在 YAML 内保持一致，以便日志中可见真实命令。
 
 为确保 SFT、LoRA 与 RLHF 任务可以顺利执行，建议遵循下列文件格式与输出规范：
 
 #### SFT（监督微调）
 
 - **数据格式**：使用 UTF-8 编码的 `.jsonl` 文件，每行一个 JSON 对象，推荐字段：
+  分类任务：
   ```json
-  {"instruction": "写一首诗", "input": "主题：春天", "output": "春风拂面..."}
+  {
+  "id": "cls_0001",
+  "task": "classification",
+  "labels": ["高风险", "中风险", "低风险"],
+  "messages": [
+    {"role": "system", "content": "你是银行风险分类助手，只能输出一个类别：高风险/中风险/低风险。"},
+    {"role": "user", "content": "客户最近三个月逾期两次，本次贷款金额高于收入水平，请进行风险分类。"},
+    {"role": "assistant", "content": "高风险"}
+  ]
+  }
   ```
-  `instruction` 可选，若为空可以仅保留 `input` 与 `output`；多轮对话可将历史拼接进 `input`。
+
+  多轮对话任务
+  ```json
+  {
+  "id": "dialog_0001",
+  "task": "multi_turn_chat",
+  "messages": [
+    {"role": "system", "content": "你是智能客服助手，回答内容要礼貌、准确。"},
+    
+    {"role": "user", "content": "我想查询一下我的信用卡账单。"},
+    {"role": "assistant", "content": "好的，请问您需要查询本期账单还是历史账单？"},
+    
+    {"role": "user", "content": "查一下本期吧。"},
+    {"role": "assistant", "content": "本期账单金额为 3500 元，还款日为 2024-11-28。如需查看交易明细，我也可以帮您查询。"}
+    ]
+  }
+  ```
+  
+  摘要任务
+  ```json
+  {
+  "id": "sum_0001",
+  "task": "summarization",
+  "messages": [
+    {"role": "system", "content": "你是摘要助手，需要从长文本中提取关键结论，输出 100 字以内摘要。"},
+    {"role": "user", "content": "本季度我们完成了智能客服系统的升级，新增了自动意图识别和智能分流功能。使用后客户满意度提升了 8%，人工坐席压力降低了 15%。但系统在高并发场景下仍有响应慢的问题，需要进一步优化缓存策略。"},
+    {"role": "assistant", "content": "本季度智能客服升级显著提升了满意度和效率，自动意图识别与分流成效明显。人工坐席压力下降，但高并发场景仍存在响应慢的问题，后续需优化缓存与架构性能。"}
+  ]
+  }
+  ```
+  强化学习偏好数据（DPO / RM 通用）
+  ```json
+  {
+  "id": "pref_00213",
+  "messages": [
+    {"role": "system", "content": "你是金融风险顾问。"},
+    {"role": "user", "content": "用户过去三个月逾期两次，本次想申请 5 万信用贷款，请给出审核建议。"}
+  ],
+  "chosen": "根据用户最近的逾期记录与当前负债情况，建议谨慎审批……",
+  "rejected": "他逾期挺多的，别批。"
+  }
+  、、、
+ 
 - **训练配置**：在 YAML 顶层声明 `job.type: sft`，同时提供 `model`, `training`, `evaluation`（可选）等段落，例如：
   ```yaml
   job:
