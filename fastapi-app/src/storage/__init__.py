@@ -42,6 +42,14 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _ensure_aware(dt: datetime) -> datetime:
+    """Return a timezone-aware datetime, assuming UTC for naive values."""
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _as_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -590,15 +598,17 @@ class DatabaseStorage:
                 name=file.name,
                 stored_name=file.stored_name,
                 bytes=file.bytes,
-                uploaded_at=file.uploaded_at,
+                uploaded_at=_ensure_aware(file.uploaded_at),
             )
-            for file in sorted(dataset.files, key=lambda item: item.uploaded_at)
+            for file in sorted(
+                dataset.files, key=lambda item: _ensure_aware(item.uploaded_at)
+            )
         ]
         train_config = None
         if dataset.train_config:
             train_config = DatasetTrainConfig(
                 filename=dataset.train_config.filename,
-                uploaded_at=dataset.train_config.uploaded_at,
+                uploaded_at=_ensure_aware(dataset.train_config.uploaded_at),
                 size=dataset.train_config.size,
             )
         metadata = DatasetMetadata.model_validate(_from_json(dataset.metadata_json, {}))
