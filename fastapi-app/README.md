@@ -307,6 +307,23 @@
   curl http://localhost:8000/api/projects
   ```
 
+### 模型训练模式输入输出说明
+
+为了支持不同的训练范式（SFT、LoRA、RLHF），训练相关接口在创建项目与触发运行时遵循统一的输入/输出模型：
+
+- **输入模型**：`ProjectCreate` 请求体，字段为 `name`、`dataset_name`、`training_yaml_name`、`description`（可选）。模型类型通过 `training_yaml_name` 指向的配置文件内部字段决定，而非额外的 API 参数。【F:fastapi-app/src/models/__init__.py†L22-L33】【F:fastapi-app/src/features/projects/api.py†L38-L45】
+- **输出模型**：创建成功返回 `ProjectDetail`；启动运行后返回 `RunDetail`，包含 `status`、`progress`、`start_command` 与实时日志条目。【F:fastapi-app/src/models/__init__.py†L35-L57】【F:fastapi-app/src/features/projects/api.py†L64-L107】
+
+下表总结了三种常见训练模式在配置与数据上的约定：
+
+| 训练模式 | 训练配置 (`training_yaml_name`) 关键字段 | 数据文件 (`dataset_name`) 约定 | 运行时 `start_command` 期望 |
+| -------- | ------------------------------------- | ----------------------------- | --------------------------- |
+| **SFT（监督微调）** | 在 YAML 中声明 `job.type: sft` 或等效字段，配置基座模型、学习率、批大小等；可选 `evaluation`、`push_to_hub` 等段落 | 推荐使用 `.jsonl` 文件，每行包含 `instruction`（可选）、`input`、`output` 字段 | 默认命令为 `bash run_train_full_sft.sh <training_yaml_name>`；如需自定义脚本，可在 YAML 中维护相同入口 |
+| **LoRA 适配** | YAML 顶层需包含 `job.type: lora`，并在 `lora` 节内指定秩、α、target modules；仍可复用 SFT 的优化器/调度器配置 | 仍采用 `.jsonl` 指令数据结构，通常与 SFT 共用；若存在额外权重初始化需求，可在 YAML 里指明 | 建议提供 `run_train_full_lora.sh` 等脚本并在 YAML 中保持与 `start_command` 一致，最终返回的 `RunDetail.start_command` 将反映实际调用命令 |
+| **RLHF / PPO** | YAML 须声明 `job.type: rl`（例如 `ppo`），并提供奖励模型、参考模型、PPO 超参；可包含评估/检查点策略 | 数据集应当提供偏好对或打分对，示例 `.jsonl` 字段：`prompt`、`chosen`、`rejected` 或 `response`, `score` | 需准备对应脚本（如 `run_train_full_rl.sh`）；接口返回的 `start_command` 可用于审计启动参数 |
+
+> **提示**：上述 YAML 与数据字段是推荐约定，后端不会强制校验字段名，但训练容器必须能够识别这些配置。若需要扩展其它任务类型，可继续沿用同一接口规范，只需保证 `training_yaml_name` 指向的配置与运行脚本一致。
+
 ### `POST /api/projects/{project_reference}/runs`
 - **功能**：为指定项目创建一次训练运行；支持使用项目 ID 或名称查找，并会校验所需数据/配置文件是否存在后通过 `docker exec` 启动训练。 【F:fastapi-app/src/features/projects/api.py†L48-L108】
 - **入参**：
